@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/channel/openrouter"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 
@@ -103,6 +104,71 @@ func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, fo
 	return helper.ObjectData(c, lastStreamResponse)
 }
 
+func shouldAppendFixedStreamTextBefore(info *relaycommon.RelayInfo, data string) bool {
+	if info.RelayFormat != types.RelayFormatOpenAI ||
+		info.RelayMode != relayconstant.RelayModeChatCompletions ||
+		info.ChannelSetting.FixedStreamText == "" ||
+		data == "" {
+		return false
+	}
+
+	var streamResponse dto.ChatCompletionsStreamResponse
+	if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
+		return false
+	}
+
+	if len(streamResponse.Choices) == 0 {
+		return streamResponse.Usage != nil
+	}
+
+	for _, choice := range streamResponse.Choices {
+		if choice.FinishReason != nil && *choice.FinishReason != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func appendFixedStreamText(c *gin.Context, info *relaycommon.RelayInfo, baseData string) error {
+	if info.ChannelSetting.FixedStreamText == "" {
+		return nil
+	}
+
+	var streamResponse dto.ChatCompletionsStreamResponse
+	if baseData != "" {
+		if err := common.UnmarshalJsonStr(baseData, &streamResponse); err != nil {
+			return err
+		}
+	}
+
+	if streamResponse.Id == "" {
+		streamResponse.Id = helper.GetResponseID(c)
+	}
+	if streamResponse.Created == 0 {
+		streamResponse.Created = common.GetTimestamp()
+	}
+	if streamResponse.Model == "" {
+		streamResponse.Model = info.UpstreamModelName
+	}
+	if streamResponse.Object == "" {
+		streamResponse.Object = "chat.completion.chunk"
+	}
+
+	fixedText := info.ChannelSetting.FixedStreamText
+	streamResponse.Choices = []dto.ChatCompletionsStreamResponseChoice{
+		{
+			Index: 0,
+			Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+				Content: &fixedText,
+			},
+		},
+	}
+	streamResponse.Usage = nil
+
+	info.SendResponseCount++
+	return helper.ObjectData(c, streamResponse)
+}
+
 func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	if resp == nil || resp.Body == nil {
 		logger.LogError(c, "invalid response or response body")
@@ -121,12 +187,20 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var usage = &dto.Usage{}
 	var lastStreamData string
 	var secondLastStreamData string // 存储倒数第二个stream data，用于音频模型
+	var fixedStreamTextSent bool
 
 	// 检查是否为音频模型
 	isAudioModel := strings.Contains(strings.ToLower(model), "audio")
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		if lastStreamData != "" {
+			if !fixedStreamTextSent && shouldAppendFixedStreamTextBefore(info, lastStreamData) {
+				if err := appendFixedStreamText(c, info, lastStreamData); err != nil {
+					common.SysLog("error appending fixed stream text: " + err.Error())
+					sr.Error(err)
+				}
+				fixedStreamTextSent = true
+			}
 			if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
 				common.SysLog("error handling stream format: " + err.Error())
 				sr.Error(err)
@@ -172,8 +246,20 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	}
 
 	if info.RelayFormat == types.RelayFormatOpenAI {
+		appendBeforeLastResponse := !fixedStreamTextSent && shouldAppendFixedStreamTextBefore(info, lastStreamData)
+		if appendBeforeLastResponse {
+			if err := appendFixedStreamText(c, info, lastStreamData); err != nil {
+				logger.LogError(c, "error appending fixed stream text: "+err.Error())
+			}
+			fixedStreamTextSent = true
+		}
 		if shouldSendLastResp {
 			_ = sendStreamData(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent)
+		}
+		if !fixedStreamTextSent && info.ChannelSetting.FixedStreamText != "" && lastStreamData != "" {
+			if err := appendFixedStreamText(c, info, lastStreamData); err != nil {
+				logger.LogError(c, "error appending fixed stream text: "+err.Error())
+			}
 		}
 	}
 

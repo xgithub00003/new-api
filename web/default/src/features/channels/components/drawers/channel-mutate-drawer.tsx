@@ -218,6 +218,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.thinking_to_content ||
     values.pass_through_body_enabled ||
     values.system_prompt_override ||
+    values.fixed_stream_text?.trim() ||
     values.claude_beta_query ||
     values.upstream_model_update_check_enabled ||
     values.upstream_model_update_auto_sync_enabled ||
@@ -3220,6 +3221,31 @@ export function ChannelMutateDrawer({
                             </FormControl>
                             <FormDescription>
                               {t('Default system prompt for this channel')}
+                            </FormDescription>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+
+                      <FormField
+                        control={form.control}
+                        name='fixed_stream_text'
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>{t('Fixed Stream Text')}</FormLabel>
+                            <FormControl>
+                              <Textarea
+                                placeholder={t(
+                                  'Text appended to the end of OpenAI chat stream responses'
+                                )}
+                                rows={3}
+                                {...field}
+                              />
+                            </FormControl>
+                            <FormDescription>
+                              {t(
+                                'Append this text to the end of OpenAI chat stream responses'
+                              )}
                             </FormDescription>
                             <FormMessage />
                           </FormItem>
